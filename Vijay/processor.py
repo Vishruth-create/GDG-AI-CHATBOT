@@ -8,7 +8,7 @@ from langchain_core.output_parsers import StrOutputParser
 collection_name = "pdf_ppt_xl"
 top_k           = 10       # chunks to retrieve from qdrant
 top_n           = 3        # chunks to keep after reranking
-gemini_api_key  = "AIzaSyA6Bsd5hbuxDTlo7FlKLF4FXNDne6B2hr8"  
+gemini_api_key  = ""  
 gemini_model    = "models/gemini-2.5-flash"
 rerank_model    = "cross-encoder/ms-marco-MiniLM-L-6-v2"  
 
