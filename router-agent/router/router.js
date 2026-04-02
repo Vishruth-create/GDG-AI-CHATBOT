@@ -1,5 +1,6 @@
 import {client} from "../llm/client.js";
 import {buildRouterPrompt} from "./prompt.js";
+import { parseLLMResponse } from "./parser.js";
 
 export async function llmRouter ({message, shortMemory, longMemory}){
   const prompt=buildRouterPrompt({message, shortMemory, longMemory});
@@ -19,14 +20,6 @@ export async function llmRouter ({message, shortMemory, longMemory}){
   });
   const text = res.choices[0].message.content;
 
-  try{
-    return JSON.parse(text);
-  } catch (err){
-    console.error("Invalid JSON:", text);
-    return {
-      type:"NEW_QUERY",
-      confidence:0.5,
-      reasone:"Fallback parsing error"
-    };
+  return parseLLMResponse(text);
   }
 }
