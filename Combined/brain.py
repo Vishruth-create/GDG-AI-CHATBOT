@@ -6,6 +6,8 @@ import json
 import asyncio
 import requests
 from fastmcp import Client
+from send import send_document
+import base64
 
 # ──────────────────────────────────────────────────────────────
 # Config
@@ -16,20 +18,14 @@ OLLAMA_CHAT     = f"{OLLAMA_BASE}/api/chat"
 OLLAMA_MODEL    = "huihui_ai/qwen3.5-abliterated:9b"
 REQUEST_TIMEOUT = 90
 
-MCP_SERVER_URL  = "http://localhost:8001/mcp"   # matches server.py
+MCP_SERVER_URL  = "http://localhost:8001/mcp"
 
 
 # ──────────────────────────────────────────────────────────────
-# MCP helpers  (async, use the fastmcp Client your teammate wrote)
+# MCP helpers
 # ──────────────────────────────────────────────────────────────
 
 async def _fetch_mcp_tools() -> list[dict]:
-    """
-    Ask the FastMCP server for its tool list and convert to Ollama format.
-
-    FastMCP returns Tool objects with .name, .description, .inputSchema.
-    Ollama expects: {"type": "function", "function": {name, description, parameters}}
-    """
     async with Client(MCP_SERVER_URL) as client:
         mcp_tools = await client.list_tools()
 
@@ -39,7 +35,6 @@ async def _fetch_mcp_tools() -> list[dict]:
             "function": {
                 "name":        t.name,
                 "description": t.description or "",
-                # inputSchema is already a valid JSON-Schema dict
                 "parameters":  t.inputSchema or {"type": "object", "properties": {}},
             },
         }
@@ -51,9 +46,8 @@ async def _call_mcp_tool(name: str, arguments: dict) -> str:
     async with Client(MCP_SERVER_URL) as client:
         result = await client.call_tool(name, arguments)
 
-    # result is a CallToolResult — the iterable is result.content
     parts = []
-    for block in result.content:              # ← .content is the list
+    for block in result.content:
         if hasattr(block, "text"):
             parts.append(block.text)
         else:
@@ -70,12 +64,11 @@ async def _call_mcp_tool(name: str, arguments: dict) -> str:
 # ──────────────────────────────────────────────────────────────
 
 def _ollama_chat(messages: list[dict], tools: list[dict] | None = None) -> dict:
-    """Single POST to Ollama /api/chat. Returns raw response dict."""
     payload = {
-        "model":   OLLAMA_MODEL,
+        "model":    OLLAMA_MODEL,
         "messages": messages,
-        "stream":  False,
-        "options": {"temperature": 0.7, "num_predict": 512},
+        "stream":   False,
+        "options":  {"temperature": 0.7, "num_predict": 512},
     }
     if tools:
         payload["tools"] = tools
@@ -91,28 +84,22 @@ def _ollama_chat(messages: list[dict], tools: list[dict] | None = None) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────
-# Core response generator  (called from app.py — sync interface)
+# Core response generator  (sync interface for app.py)
 # ──────────────────────────────────────────────────────────────
 
 def generate_response(
     messages:       list[dict],
     system_context: str | None = None,
+    phone_number:   str | None = None,
 ) -> str:
-    """
-    Public interface — stays synchronous so app.py needs no changes.
-    Internally runs the async MCP tool loop via asyncio.run().
-    """
-    return asyncio.run(_generate_response_async(messages, system_context))
+    return asyncio.run(_generate_response_async(messages, system_context, phone_number))
 
 
 async def _generate_response_async(
     messages:       list[dict],
     system_context: str | None = None,
+    phone_number:   str | None = None,
 ) -> str:
-    """
-    Async core: loads MCP tools, sends to Ollama, executes any tool calls,
-    loops until Ollama returns a plain text reply.
-    """
     MAX_TOOL_ROUNDS = 5
 
     system = system_context or (
@@ -122,12 +109,12 @@ async def _generate_response_async(
         "about emails, inbox, sending mail, or Google Classroom."
     )
 
-    # Build working message list (we append tool results to this as we loop)
+    # ── Build the working message list ────────────────────────
     working_messages = [{"role": "system", "content": system}]
     for msg in messages:
         working_messages.append({"role": msg["role"], "content": msg["content"]})
 
-    # Load tools from the FastMCP server once per request
+    # ── Load MCP tools once per request ───────────────────────
     tools = []
     try:
         tools = await _fetch_mcp_tools()
@@ -150,14 +137,13 @@ async def _generate_response_async(
         message    = raw.get("message", {})
         tool_calls = message.get("tool_calls", [])
 
-        # ── No tool calls → Ollama gave us the final reply ────
+        # ── No tool calls → final reply ───────────────────────
         if not tool_calls:
             return message.get("content", "").strip()
 
-        # ── Tool calls present → execute each, append results ─
+        # ── Tool calls → execute each, append results ─────────
         print(f"[brain] Round {round_num + 1}: Ollama called {len(tool_calls)} tool(s)")
 
-        # Append assistant's tool-call turn to history
         working_messages.append({
             "role":       "assistant",
             "content":    message.get("content", ""),
@@ -169,7 +155,6 @@ async def _generate_response_async(
             tool_name = fn["name"]
             tool_args = fn.get("arguments", {})
 
-            # Ollama sometimes sends arguments as a JSON string
             if isinstance(tool_args, str):
                 try:
                     tool_args = json.loads(tool_args)
@@ -183,7 +168,21 @@ async def _generate_response_async(
                 result_text = f"Tool error: {e}"
             print(f"[brain] ← Tool result: {result_text[:120]}...")
 
-            # Append tool result so Ollama can see it in the next round
+            # ── Detect attachment results and forward to WhatsApp
+            if tool_name == "gmail_sent_attachments_to_whatsapp" and phone_number:
+                try:
+                    att_payload  = json.loads(result_text)
+                    attachments  = att_payload.get("attachments", [])
+                    for att in attachments:
+                        file_bytes = base64.b64decode(att["data_b64"])
+                        send_document(phone_number, file_bytes, att["filename"], att["mime_type"])
+                    result_text = (
+                        f"Sent {len(attachments)} attachment(s) to WhatsApp: "
+                        + ", ".join(a["filename"] for a in attachments)
+                    ) if attachments else "No attachments found."
+                except Exception as e:
+                    print(f"[brain] Attachment forwarding error: {e}")
+
             working_messages.append({
                 "role":    "tool",
                 "name":    tool_name,
@@ -194,7 +193,7 @@ async def _generate_response_async(
 
 
 # ──────────────────────────────────────────────────────────────
-# Summarizer  (unchanged — no tools needed here)
+# Summarizer
 # ──────────────────────────────────────────────────────────────
 
 def summarize_conversation(history_text: str) -> str:

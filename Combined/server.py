@@ -79,5 +79,37 @@ async def gmail_archive_email(message_id: str):
 
      return await gmail_service.archive_email(message_id)
 
+import base64  # add this at the top
+
+@mcp.tool()
+async def gmail_sent_attachments_to_whatsapp(query: str):
+    """
+    Search Gmail for emails matching query...
+    Then find PDF Attachment and send it to whatsapp directly.
+    When user asks "send", "share" or "forward" files, PDFs or attachments.
+
+    Args:
+        query: Search terms e.g 'notes'
+    """
+    results = await gmail_service.list_inbox(max_results=5, query=f"{query} has:attachment")
+    emails = results.get("emails", [])
+    attachments = []
+
+    for email in emails:
+        atts = await gmail_service.get_email_attachments(email["id"])
+        attachments.extend(atts)
+
+    # ← KEY FIX: convert raw bytes to base64 so MCP can serialize the response
+    return {
+        "attachments": [
+            {
+                "filename":  att["filename"],
+                "mime_type": att["mime_type"],
+                "data_b64":  base64.b64encode(att["bytes"]).decode(),
+            }
+            for att in attachments
+        ]
+    }
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http", port=8001, path="/mcp")

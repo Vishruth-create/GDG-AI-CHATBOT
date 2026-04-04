@@ -213,3 +213,36 @@ async def get_submissions(course_id: str, assignment_id: str) -> dict:
 
 async def search_email(query: str, max_results: int = 10) -> dict:
     return await list_inbox(max_results=max_results, query=query)
+
+async def get_email_attachments(message_id:str)->list:
+    """Download all the PDF Attachments from a specific email."""
+    service=get_gmail_service()
+    msg=service.users().messages().get(userId="me", id=message_id, format="full").execute()
+
+    attachments=[]
+
+    def find_attachments(payload):
+        headers   = {h["name"]: h["value"] for h in payload.get("headers", [])}
+        mime_type = payload.get("mimeType", "")
+        filename  = headers.get("Content-Disposition", "")
+        
+        fname = payload.get("filename", "")
+        
+        if fname and payload.get("body", {}).get("attachmentId"):
+            att_id = payload["body"]["attachmentId"]
+            att    = service.users().messages().attachments().get(
+                userId="me", messageId=message_id, id=att_id
+            ).execute()
+            
+            file_bytes = base64.urlsafe_b64decode(att["data"])
+            attachments.append({
+                "filename":   fname,
+                "mime_type":  mime_type,
+                "bytes":      file_bytes,
+            })
+        
+        for part in payload.get("parts", []):
+            find_attachments(part)
+    
+    find_attachments(msg["payload"])
+    return attachments

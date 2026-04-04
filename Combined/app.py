@@ -185,6 +185,7 @@ def handle_message_pipeline(
         reply = generate_response(
             messages=context["messages"],
             system_context=context["system_context"],
+            phone_number=phone_number, 
         )
     except Exception as e:
         print(f"[pipeline] generate_response failed: {e}")
