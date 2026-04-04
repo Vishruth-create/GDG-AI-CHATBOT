@@ -117,6 +117,35 @@ async def archive_email(message_id: str) -> dict:
     ).execute()
     return {"success": True, "archived": message_id}
 
+async def search_email(query: str, max_results: int = 10) -> dict:
+    """Search emails using Gmail search syntax."""
+    service = get_gmail_service()
+    result = service.users().messages().list(
+        userId="me", q=query, maxResults=min(max_results, 50)
+    ).execute()
+
+    messages = result.get("messages", [])
+    if not messages:
+        return {"emails": [], "message": f"No emails found for query: {query}"}
+    
+    summaries = []
+    for m in messages:
+        msg = service.users().messages().get(
+            userId="me", id=m["id"], format="metadata",
+            metadataHeaders=["From", "Subject", "Date"]
+        ).execute()
+        headers = {h["name"]: h["value"] for h in msg["payload"].get("headers", [])}
+        summaries.append({
+            "id":      m["id"],
+            "from":    headers.get("From", ""),
+            "subject": headers.get("Subject", ""),
+            "date":    headers.get("Date", ""),
+            "snippet": msg.get("snippet", ""),
+            "unread":  "UNREAD" in msg.get("labelIds", []),
+        })
+    return {"emails": summaries}
+
+# async def get_email_attachments
 
 # --- HELPERS ---
 
@@ -132,7 +161,7 @@ def _extract_body(payload: dict) -> str:
     return payload.get("snippet", "")
 
 # FOR CLASSROOM
-def get_classroom_service():
+async def get_classroom_service():
     """Builds the authorized Classroom service object."""
     creds = Credentials(
         token=os.getenv("gmail_acess_token"),
