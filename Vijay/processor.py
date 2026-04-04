@@ -1,14 +1,17 @@
+import os
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from dotenv import load_dotenv
+from config import retrieval_config, collection_name
 
-# configuration
-collection_name = "pdf_ppt_xl"
-top_k           = 10       # chunks to retrieve from qdrant
-top_n           = 3        # chunks to keep after reranking
-gemini_api_key  = ""  
+top_k = retrieval_config.top_k #from qdrant
+top_n = retrieval_config.top_n
+
+load_dotenv()
+gemini_api_key=  os.getenv("gemini_api_key")
 gemini_model    = "models/gemini-2.5-flash"
 rerank_model    = "cross-encoder/ms-marco-MiniLM-L-6-v2"  
 
@@ -17,7 +20,7 @@ def setup_qdrant():
     try:
         client = QdrantClient(host="localhost", port=6333)
         client.get_collections()
-        print("qdrant connected")
+        print("loading")
         return client
     except Exception as e:
         print("qdrant not connected, check if docker is running")
@@ -25,29 +28,22 @@ def setup_qdrant():
 
 # load the same minilm model used in embed.py
 def load_model():
-    print("loading minilm model")
     model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-    print("minilm ready")
     return model
 
 # load cross encoder for reranking
 def load_reranker():
-    print("loading cross encoder")
-    reranker = CrossEncoder(rerank_model)
-    print("reranker ready")
+    reranker = CrossEncoder(retrieval_config.rerank_model)
     return reranker
 
 
-# load gemini llm via langchain
 def load_llm():
     llm = ChatGoogleGenerativeAI(
-        model         =gemini_model,
+        model=retrieval_config.gemini_model,
         google_api_key=gemini_api_key,
-        temperature   =0
+        temperature=0
     )
-    print("gemini ready")
     return llm
-
 
 # create prompt template for rag
 def create_prompt():
@@ -104,7 +100,6 @@ def search_qdrant(query, model, client):
             "score"   : round(r.score, 3)
         })
 
-    print(f"Retrieved {len(chunks)} chunks from Qdrant")
     return chunks
 
 
@@ -126,7 +121,6 @@ def rerank_chunks(query, chunks, reranker):
     )
 
     top_chunks = reranked[:top_n]
-    print(f"Reranked and kept top {top_n} chunks")
     return top_chunks
 
 
@@ -156,35 +150,13 @@ def generate_answer(query, reranked_chunks, chain):
     return answer
 
 
-# show retrieved chunks before sending to llm
-def show_retrieved(chunks):
-    print("\nTop chunks after reranking:")
-    for i, c in enumerate(chunks, 1):
-        print(f"\n  #{i} Rerank score {c['rerank_score']} | Page {c['page_num']}")
-        print(f"      {c['text'][:]}...")
-
 
 # main pipeline that runs when user asks a question
-def ask(query, model, client, reranker, chain):
-    print(f"Question: {query}")
-
-    # step 1 retrieve from qdrant
+def ask_query(query, model, client, reranker, chain):
     chunks   = search_qdrant(query, model, client)
-
-    # step 2 rerank with cross encoder
     reranked = rerank_chunks(query, chunks, reranker)
-
-    # step 3 show what was retrieved
-    show_retrieved(reranked)
-
-    # step 4 generate answer with gemini
     answer   = generate_answer(query, reranked, chain)
-
-    print(f"\nAnswer:\n{answer}")
-    print("\nSources:")
-    for c in reranked:
-        print(f"  Page {c['page_num']} | {c['source']}")
-    
+    print(f"\nAnswer: {answer}")
     return answer
 
 
@@ -199,7 +171,6 @@ if __name__ == "__main__":
     prompt   = create_prompt()
     chain    = create_rag_chain(llm, prompt)
 
-    print("\npdf rag system ready")
     print("Type your question (type exit to quit)")
 
     # interactive question loop
@@ -212,4 +183,4 @@ if __name__ == "__main__":
         if not query:
             continue
 
-        ask(query, model, client, reranker, chain)
+        ask_query(query, model, client, reranker, chain)

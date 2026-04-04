@@ -2,7 +2,7 @@ import re
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 from config import collection_name
-
+from config import QdrantConfig
 # symbol removal and text cleaning
 def clean_text(text):
     text = re.sub(r'\x00', ' ', text)
@@ -28,12 +28,14 @@ def is_garbage_text(text):
 
     return False
 
-#qdrant setup
+
 def setup_qdrant():
     try:
-        client = QdrantClient(host="localhost", port=6333)
-        client.get_collections()
-        print("Qdrant connected (Docker @ localhost:6333)")
+        qdrant_config = QdrantConfig()
+        client = QdrantClient(
+            host=qdrant_config.host,
+            port=qdrant_config.port
+        )
         return client
     except Exception as e:
         print("Qdrant is not connected")
