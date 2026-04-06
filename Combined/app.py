@@ -37,7 +37,7 @@ import os
 import threading
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
-
+import requests
 import db
 from brain import generate_response, summarize_conversation
 from send import send_message
@@ -80,23 +80,84 @@ def parse_whatsapp_webhook(data: dict) -> dict | None:
     contact = value["contacts"][0]
 
     # Only handle text messages for now
-    if message.get("type") != "text":
-        print(f"[webhook] Skipping non-text message type: {message.get('type')}")
+    msg_type = message.get("type")
+
+    if msg_type == "text":
+        return {
+            "phone_number": message["from"],
+            "sender_name":  contact["profile"]["name"],
+            "message_text": message["text"]["body"],
+            "wamid":        message["id"],
+            "msg_type":     "text",
+            "raw_value":    value,
+        }
+
+    elif msg_type in ("document", "image", "video", "audio"):
+        media_obj = message.get(msg_type, {})
+        return {
+            "phone_number": message["from"],
+            "sender_name":  contact["profile"]["name"],
+            "message_text": "",                              # no text body for media
+            "wamid":        message["id"],
+            "msg_type":     msg_type,
+            "media_id":     media_obj.get("id"),
+            "filename":     media_obj.get("filename", f"file.{msg_type}"),
+            "mime_type":    media_obj.get("mime_type", "application/octet-stream"),
+            "raw_value":    value,
+        }
+
+    else:
+        print(f"[webhook] Skipping unsupported message type: {msg_type}")
         return None
-
-    return {
-        "phone_number": message["from"],
-        "sender_name":  contact["profile"]["name"],
-        "message_text": message["text"]["body"],
-        "wamid":        message["id"],
-        "msg_type":     message["type"],
-        "raw_value":    value,
-    }
-
 
 # ──────────────────────────────────────────────────────────────
 # The full 8-step pipeline (runs in a background daemon thread)
 # ──────────────────────────────────────────────────────────────
+
+def handle_media_pipeline(phone_number: str, sender_name: str, wamid: str,
+                           media_id: str, filename: str, mime_type: str) -> None:
+    """Downloads a WhatsApp media file and ingests it into the Qdrant knowledge base."""
+    import tempfile
+    from embed import load_file
+    from processing import make_chunks, embed_chunks
+    from database import insert_to_qdrant
+
+    try:
+        send_message(phone_number, f"📥 Receiving '{filename}'... processing it now!")
+        file_bytes = download_whatsapp_media(media_id)
+    except Exception as e:
+        print(f"[media] Download failed: {e}")
+        send_message(phone_number, "❌ Couldn't download that file. Please try again.")
+        return
+
+    ext = os.path.splitext(filename)[1] or f".{mime_type.split('/')[-1]}"
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
+        f.write(file_bytes)
+        temp_path = f.name
+
+    try:
+        from qdrant_client import QdrantClient
+        from utilities import setup_qdrant, load_model
+
+        pages   = load_file(temp_path)
+        chunks  = make_chunks(pages)
+        model   = load_model()
+        vectors = embed_chunks(chunks, model)
+        client  = setup_qdrant()
+        insert_to_qdrant(chunks, vectors, client)
+
+        send_message(phone_number,
+            f"✅ Done! I've read '{filename}' ({len(chunks)} sections stored). "
+            f"Ask me anything about it!")
+
+        db.save_message(phone_number=phone_number, role="assistant",
+                        content=f"[Ingested file: {filename}]")
+    except Exception as e:
+        print(f"[media] Ingestion error for {filename}: {e}")
+        send_message(phone_number, f"❌ I couldn't process '{filename}'. "
+                                    "Supported formats: PDF, PPTX, DOCX, XLSX, images.")
+    finally:
+        os.unlink(temp_path)
 
 def handle_message_pipeline(
     phone_number: str,
@@ -272,20 +333,50 @@ def whatsapp():
     # ── Spawn background thread and return 200 immediately ────
     # Meta requires a 200 within ~20 s. All heavy work happens
     # inside handle_message_pipeline() on a daemon thread.
-    pipeline_thread = threading.Thread(
-        target=handle_message_pipeline,
-        kwargs={
-            "phone_number": parsed["phone_number"],
-            "sender_name":  parsed["sender_name"],
-            "message_text": parsed["message_text"],
-            "wamid":        parsed["wamid"],
-            "raw_value":    parsed["raw_value"],
-        },
-        daemon=True,
-    )
+    if parsed["msg_type"] == "text":
+        pipeline_thread = threading.Thread(
+            target=handle_message_pipeline,
+            kwargs={
+                "phone_number": parsed["phone_number"],
+                "sender_name":  parsed["sender_name"],
+                "message_text": parsed["message_text"],
+                "wamid":        parsed["wamid"],
+                "raw_value":    parsed["raw_value"],
+            },
+            daemon=True,
+        )
+    else:
+        pipeline_thread = threading.Thread(
+            target=handle_media_pipeline,
+            kwargs={
+                "phone_number": parsed["phone_number"],
+                "sender_name":  parsed["sender_name"],
+                "wamid":        parsed["wamid"],
+                "media_id":     parsed["media_id"],
+                "filename":     parsed["filename"],
+                "mime_type":    parsed["mime_type"],
+            },
+            daemon=True,
+        )
     pipeline_thread.start()
 
     return jsonify({"status": "ok"}), 200
+
+def download_whatsapp_media(media_id: str) -> bytes:
+    """Fetch raw bytes of a WhatsApp media object by its media_id."""
+    token   = os.getenv("WA_ACCESS_TOKEN")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Step 1: resolve the media_id to a CDN url
+    meta     = requests.get(f"https://graph.facebook.com/v22.0/{media_id}", headers=headers).json()
+    media_url = meta.get("url")
+    if not media_url:
+        raise ValueError(f"Could not resolve media URL for id={media_id}")
+
+    # Step 2: download the actual bytes
+    resp = requests.get(media_url, headers=headers)
+    resp.raise_for_status()
+    return resp.content
 
 
 # ──────────────────────────────────────────────────────────────

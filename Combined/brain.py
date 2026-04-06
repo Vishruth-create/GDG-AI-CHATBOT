@@ -139,7 +139,8 @@ async def _generate_response_async(
 
         # ── No tool calls → final reply ───────────────────────
         if not tool_calls:
-            return message.get("content", "").strip()
+            reply = message.get("content", "").strip()
+            return reply if reply else "Empty response from Ollama. Please try rephrasing your question!"
 
         # ── Tool calls → execute each, append results ─────────
         print(f"[brain] Round {round_num + 1}: Ollama called {len(tool_calls)} tool(s)")
